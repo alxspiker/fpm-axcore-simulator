@@ -332,7 +332,7 @@ The AxCore framework is sealed. The digital substrate is active. The theoretical
 
 To visually verify the discrete $Z^3$ execution ledger, you can parse the raw JSON telemetry into a **Diagnostic HUD** video. This high-intensity topological array explicitly visualizes the discrete daemons as individual memory registers, proving the 1-for-1 correlation between the spatial propagation and the computational clock.
 
-https://github.com/alxspiker/fpm-axcore-simulator/raw/main/artifacts/causal_wave_render.mp4
+<video src="artifacts/causal_wave_render.mp4" controls="controls" style="max-width: 100%;"></video>
 
 ### Features of the Diagnostic HUD:
 1. **Discrete Register Visualization:** It explicitly draws the individual `x` indices as standalone memory registers using discrete markers, removing the deception of continuous line graphs.
