@@ -328,6 +328,23 @@ It is a fundamental physics simulator operating near the Planck scale. It is a p
 
 The AxCore framework is sealed. The digital substrate is active. The theoretical physics have been proven in silicon.
 
+## Visualizing the Causal Wave
+
+To visually verify the discrete $Z^3$ execution ledger, you can parse the raw JSON telemetry into a **Diagnostic HUD** video. This high-intensity topological array explicitly visualizes the discrete daemons as individual memory registers, proving the 1-for-1 correlation between the spatial propagation and the computational clock.
+
+https://github.com/alxspiker/fpm-axcore-simulator/raw/main/artifacts/causal_wave_render.mp4
+
+### Features of the Diagnostic HUD:
+1. **Discrete Register Visualization:** It explicitly draws the individual `x` indices as standalone memory registers using discrete markers, removing the deception of continuous line graphs.
+2. **The ZOMBIE Wake (Crimson `x`):** As the photon passes, the memory nodes drop out of the thermal vacuum noise ($E = 0.05$) and collapse into pure ZOMBIE state ($E = 0.0$). This visualizes the absolute exhaustion of the causal ledger behind the wavefront.
+3. **Gauge Coherence Glow (Cyan `|`):** The photon is rendered as a stacked multi-alpha spike, simulating high-intensity $100\%$ soliton momentum transfer natively in the discrete space.
+4. **Telemetry Overlay:** The real-time metric overlay updates asynchronously with the frame sweep, tracking the Universal Tick counter and the Wake State to confirm strict local limits ($c_{light}$).
+
+You can regenerate the visualization locally by running:
+```bash
+python render_mp4.py --input artifacts/photon_wave.json --output artifacts/causal_wave_render.mp4
+```
+
 ## Repository Layout
 
 ```text
