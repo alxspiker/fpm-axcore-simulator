@@ -26,7 +26,7 @@ The test harness verifies:
 - radix heap scheduler present, `std::priority_queue` absent
 - redundant daemon coordinates removed
 - hot path avoids host transcendental math
-- SPARC dataset parsing stays Python-side
+- SPARC data is downloaded from the official SPARC site into a temporary directory and deleted after the run
 - C++ accepts a sanitized SPARC payload and returns emergent substrate velocities
 
 ## Quick Start
@@ -47,6 +47,12 @@ Run the full architecture and SPARC IPC test harness:
 
 ```powershell
 python .\test_axcore_engine.py
+```
+
+By default this downloads `SPARC_Lelli2016c.mrt` and `Rotmod_LTG.zip` from the official SPARC page into a temporary directory, runs the checks, and deletes the downloaded files afterward. For offline testing you can still pass an existing local mirror:
+
+```powershell
+python .\test_axcore_engine.py --sparc-dir "C:\path\to\local_data"
 ```
 
 The main simulator writes:
@@ -182,7 +188,7 @@ The default C++ gravity probe injects a central baryonic load and measures the r
 
 ## SPARC Host-to-Substrate IPC
 
-The SPARC files live outside the engine. The Python oracle parses them and writes a tiny payload for one galaxy. The C++ substrate reads only that sanitized payload:
+The SPARC files live outside the engine. The Python oracle downloads the current public SPARC files from `https://astroweb.case.edu/SPARC/`, parses them from a temporary directory, deletes the downloaded copy after the run, and writes a tiny payload for one galaxy. The C++ substrate reads only that sanitized payload:
 
 ```json
 {

@@ -22,11 +22,16 @@ import json
 import math
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
+import urllib.request
+import zipfile
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import Iterable, Iterator
 
 
 ROOT = Path(__file__).resolve().parent
@@ -37,9 +42,9 @@ RESULTS_JSON = ARTIFACT_DIR / "fpm_axcore_results.json"
 SPARC_PAYLOAD_JSON = ARTIFACT_DIR / "sparc_injection_payload.json"
 SPARC_SUBSTRATE_JSON = ARTIFACT_DIR / "sparc_substrate_output.json"
 SIM_EXE = ROOT / "build" / "fpm_axcore.exe"
-DEFAULT_SPARC_DIR = Path(
-    r"C:\Users\alxth\OneDrive\Desktop\Finite Possibility Mechanics\local_data"
-)
+SPARC_BASE_URL = "https://astroweb.case.edu/SPARC"
+SPARC_TABLE_URL = f"{SPARC_BASE_URL}/SPARC_Lelli2016c.mrt"
+SPARC_ROTMOD_URL = f"{SPARC_BASE_URL}/Rotmod_LTG.zip"
 
 EXPECTED_CHARTS = [
     "fpm_axcore_architecture.png",
@@ -90,6 +95,62 @@ def run_command(cmd: list[str], *, timeout: int = 120) -> subprocess.CompletedPr
         timeout=timeout,
         check=False,
     )
+
+
+def download_file(url: str, destination: Path) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with urllib.request.urlopen(url, timeout=60) as response, destination.open("wb") as out:
+        shutil.copyfileobj(response, out)
+
+
+def prepare_downloaded_sparc_data(root: Path) -> Path:
+    local_data = root / "local_data"
+    local_data.mkdir(parents=True, exist_ok=True)
+
+    table_path = local_data / "SPARC_Lelli2016c.mrt"
+    zip_path = local_data / "Rotmod_LTG.zip"
+    rotmod_dir = local_data / "Rotmod_LTG"
+
+    download_file(SPARC_TABLE_URL, table_path)
+    download_file(SPARC_ROTMOD_URL, zip_path)
+
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        zf.extractall(local_data)
+
+    # Official ZIPs have historically extracted either into Rotmod_LTG/ or as
+    # loose *_rotmod.dat files. Normalize to local_data/Rotmod_LTG/.
+    if not rotmod_dir.exists():
+        rotmod_dir.mkdir()
+        for dat in local_data.glob("*_rotmod.dat"):
+            dat.replace(rotmod_dir / dat.name)
+
+    return local_data
+
+
+@contextmanager
+def sparc_data_context(explicit_dir: Path | None) -> Iterator[tuple[Path, list[Check]]]:
+    if explicit_dir is not None:
+        yield explicit_dir, [
+            Check("SPARC data source", True, f"using explicit local directory: {explicit_dir}")
+        ]
+        return
+
+    checks: list[Check] = []
+    with tempfile.TemporaryDirectory(prefix="fpm_sparc_") as tmp:
+        tmp_root = Path(tmp)
+        try:
+            sparc_dir = prepare_downloaded_sparc_data(tmp_root)
+            checks.append(
+                Check(
+                    "SPARC data source",
+                    True,
+                    f"downloaded official SPARC data to temporary directory: {sparc_dir}",
+                )
+            )
+            yield sparc_dir, checks
+        except Exception as exc:
+            checks.append(Check("SPARC data source", False, f"download failed: {exc}"))
+            yield tmp_root / "local_data", checks
 
 
 def sha256_file(path: Path) -> str:
@@ -411,11 +472,6 @@ def check_sparc_data(sparc_dir: Path) -> list[Check]:
                     nrmse < 0.30,
                     f"a0={a0:.0f} (km/s)^2/kpc rmse={rmse:.2f} km/s normalized={nrmse:.3f}",
                 ),
-                Check(
-                    "SPARC audit remains outside C++ binary",
-                    True,
-                    "dataset ingestion is Python-side; C++ simulator remains an isolated substrate",
-                ),
             ]
         )
     elif rows and rotmods:
@@ -542,7 +598,12 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Test AxCore simulator architecture and artifacts.")
     parser.add_argument("--skip-run", action="store_true", help="Compile only; do not run simulator twice.")
     parser.add_argument("--skip-build", action="store_true", help="Skip compile/run and only inspect current files.")
-    parser.add_argument("--sparc-dir", type=Path, default=DEFAULT_SPARC_DIR, help="Path to SPARC local_data.")
+    parser.add_argument(
+        "--sparc-dir",
+        type=Path,
+        default=None,
+        help="Optional existing SPARC local_data path. If omitted, official SPARC data is downloaded to a temp dir and deleted after the run.",
+    )
     args = parser.parse_args()
 
     checks: list[Check] = []
@@ -550,9 +611,20 @@ def main() -> int:
         checks.extend(run_compile_and_simulator(skip_run=args.skip_run))
     checks.extend(check_artifacts())
     checks.extend(check_source_architecture())
-    checks.extend(check_sparc_data(args.sparc_dir))
-    if not args.skip_build:
-        checks.extend(check_sparc_substrate_ipc(args.sparc_dir))
+    with sparc_data_context(args.sparc_dir) as (sparc_dir, sparc_source_checks):
+        checks.extend(sparc_source_checks)
+        checks.extend(check_sparc_data(sparc_dir))
+        if not args.skip_build:
+            checks.extend(check_sparc_substrate_ipc(sparc_dir))
+        downloaded_sparc_dir = sparc_dir if args.sparc_dir is None else None
+    if downloaded_sparc_dir is not None:
+        checks.append(
+            Check(
+                "temporary SPARC download cleaned up",
+                not downloaded_sparc_dir.exists(),
+                str(downloaded_sparc_dir),
+            )
+        )
     checks.extend(check_scaling_estimate())
     return print_results(checks)
 
