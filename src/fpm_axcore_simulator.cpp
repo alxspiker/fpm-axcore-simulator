@@ -20,6 +20,7 @@
 //
 // Compile: g++ -O2 -std=c++17 -fopenmp -o fpm_axcore fpm_axcore_simulator.cpp -lm
 // Run:     ./fpm_axcore
+// IPC:     ./fpm_axcore --sparc-payload artifacts/sparc_injection.json --sparc-output artifacts/sparc_substrate.json
 // Output:  artifacts/fpm_axcore_results.json
 //
 // Author: built from the FPM paper by Alx Spiker.
@@ -1391,6 +1392,175 @@ struct EmergentProbeTimeDilation {
     }
 };
 
+// Host-to-substrate IPC mode. The host supplies a tiny sanitized JSON payload:
+// { "points": [ {"r_kpc": ..., "v_obs": ..., "b_load": ...}, ... ] }
+// The substrate pays the routing cost and returns emergent raw velocities.
+struct SparcInjectionPoint {
+    double r_kpc = 0.0;
+    double v_obs = 0.0;
+    double b_load = 0.0;
+};
+
+struct SparcInjectionPayload {
+    std::vector<SparcInjectionPoint> points;
+};
+
+static bool read_file_string(const std::string& path, std::string& out) {
+    std::ifstream f(path, std::ios::binary);
+    if (!f) return false;
+    std::ostringstream ss;
+    ss << f.rdbuf();
+    out = ss.str();
+    return true;
+}
+
+static bool parse_json_number_after_key(const std::string& text, size_t start,
+                                        const std::string& key, double& value,
+                                        size_t& value_end) {
+    std::string needle = "\"" + key + "\"";
+    size_t key_pos = text.find(needle, start);
+    if (key_pos == std::string::npos) return false;
+    size_t colon = text.find(':', key_pos + needle.size());
+    if (colon == std::string::npos) return false;
+    size_t pos = colon + 1;
+    while (pos < text.size() && (text[pos] == ' ' || text[pos] == '\t' || text[pos] == '\n' || text[pos] == '\r')) pos++;
+    char* end_ptr = nullptr;
+    value = std::strtod(text.c_str() + pos, &end_ptr);
+    if (end_ptr == text.c_str() + pos) return false;
+    value_end = (size_t)(end_ptr - text.c_str());
+    return true;
+}
+
+static bool parse_sparc_injection_payload(const std::string& path, SparcInjectionPayload& payload) {
+    std::string text;
+    if (!read_file_string(path, text)) return false;
+
+    size_t pos = 0;
+    while (true) {
+        double r = 0.0, v = 0.0, b = 0.0;
+        size_t end_r = 0, end_v = 0, end_b = 0;
+        if (!parse_json_number_after_key(text, pos, "r_kpc", r, end_r)) break;
+        if (!parse_json_number_after_key(text, end_r, "v_obs", v, end_v)) return false;
+        if (!parse_json_number_after_key(text, end_v, "b_load", b, end_b)) return false;
+        if (r > 0.0 && v > 0.0 && b >= 0.0) {
+            payload.points.push_back({r, v, b});
+        }
+        pos = end_b;
+    }
+    return !payload.points.empty();
+}
+
+static void inject_core_load(Z3Lattice& lattice, int center, double B_load, double E_inject) {
+    double radius = 2.0;
+    for (int idx = 0; idx < lattice.size(); idx++) {
+        double dist = lattice.euclidean_dist(idx, center);
+        if (dist <= radius) {
+            Daemon& dm = lattice.arena[idx];
+            dm.E = std::min(E_inject, lattice.d.E_max);
+            dm.R[0][1] += B_load;
+            dm.R[1][0] -= B_load;
+            dm.R[0][0] += 0.06 * B_load;
+            dm.R[1][1] += 0.06 * B_load;
+            dm.R[2][2] += 0.03 * B_load;
+        }
+    }
+}
+
+static double measure_shell_L(Z3Lattice& lattice, ThermodynamicScheduler& sched,
+                              const DerivedConstants& d, int center, double shell_r) {
+    double sum_L = 0.0;
+    int n = 0;
+    for (int idx = 0; idx < lattice.size(); idx++) {
+        double dist = lattice.euclidean_dist(idx, center);
+        if (std::abs(dist - shell_r) <= 0.7 && lattice.arena[idx].is_active) {
+            Daemon& dm = lattice.arena[idx];
+            double O, k, C_N;
+            viscosity_update(dm, d, 0.0, O, k, C_N);
+            double C_sem, C_geo, sm;
+            sum_L += axcore_lagrangian(dm, d, O, sched.cfg, C_sem, C_geo, sm);
+            n++;
+        }
+    }
+    return n > 0 ? std::max(d.L_rest, sum_L / n) : d.L_rest;
+}
+
+static int run_sparc_payload_mode(const std::string& payload_path, const std::string& output_path) {
+    SparcInjectionPayload payload;
+    if (!parse_sparc_injection_payload(payload_path, payload)) {
+        std::cerr << "ERROR: failed to parse sanitized SPARC injection payload: " << payload_path << "\n";
+        return 2;
+    }
+
+    Axioms ax;
+    DerivedConstants d = derive_all(ax);
+
+    double max_r = 0.0;
+    for (const auto& p : payload.points) max_r = std::max(max_r, p.r_kpc);
+    if (max_r <= 0.0) return 3;
+
+    std::vector<double> raw_v, shell_L, shell_radii;
+    raw_v.reserve(payload.points.size());
+    shell_L.reserve(payload.points.size());
+    shell_radii.reserve(payload.points.size());
+
+    for (size_t pi = 0; pi < payload.points.size(); pi++) {
+        const auto& p = payload.points[pi];
+        Z3Lattice lattice(32, 32, 4, d, 7200 + (int)pi);
+        ThermodynamicScheduler sched(lattice, d);
+        int center = lattice.flat(lattice.sx/2, lattice.sy/2, lattice.sz/2);
+        double shell_r = 3.0 + 11.0 * p.r_kpc / max_r;
+        shell_radii.push_back(shell_r);
+
+        inject_core_load(lattice, center, std::min(24.0, p.b_load), 0.66);
+
+        for (int tick = 0; tick < 70; tick++) {
+            for (int i = 0; i < lattice.size(); i++) {
+                double L, O, k;
+                sched.step_one(L, O, k);
+            }
+            if (tick % 10 == 0) sched.mean_field_truth_target();
+        }
+
+        double L_mean = measure_shell_L(lattice, sched, d, center, shell_r);
+        shell_L.push_back(L_mean);
+
+        double gradient = 1.0 + 0.015 * std::min(24.0, p.b_load);
+        raw_v.push_back((d.L_rest / L_mean) * gradient);
+    }
+
+    std::ofstream f(output_path);
+    if (!f) {
+        std::cerr << "ERROR: failed to open SPARC substrate output: " << output_path << "\n";
+        return 4;
+    }
+    f << std::setprecision(15);
+    f << "{\n";
+    f << "  \"mode\": \"sparc_substrate\",\n";
+    f << "  \"lattice\": [32,32,4],\n";
+    f << "  \"points\": " << payload.points.size() << ",\n";
+    f << "  \"r_kpc\": [";
+    for (size_t i = 0; i < payload.points.size(); i++) { if (i) f << ","; f << payload.points[i].r_kpc; }
+    f << "],\n";
+    f << "  \"v_obs_kms\": [";
+    for (size_t i = 0; i < payload.points.size(); i++) { if (i) f << ","; f << payload.points[i].v_obs; }
+    f << "],\n";
+    f << "  \"b_load\": [";
+    for (size_t i = 0; i < payload.points.size(); i++) { if (i) f << ","; f << payload.points[i].b_load; }
+    f << "],\n";
+    f << "  \"shell_radius\": [";
+    for (size_t i = 0; i < shell_radii.size(); i++) { if (i) f << ","; f << shell_radii[i]; }
+    f << "],\n";
+    f << "  \"L_mean\": [";
+    for (size_t i = 0; i < shell_L.size(); i++) { if (i) f << ","; f << shell_L[i]; }
+    f << "],\n";
+    f << "  \"v_fpm_raw\": [";
+    for (size_t i = 0; i < raw_v.size(); i++) { if (i) f << ","; f << raw_v[i]; }
+    f << "]\n";
+    f << "}\n";
+    std::cout << "SPARC substrate output saved to: " << output_path << "\n";
+    return 0;
+}
+
 // =============================================================================
 // CALIBRATION
 // =============================================================================
@@ -1533,7 +1703,29 @@ void write_json(const std::string& path,
 // MAIN
 // =============================================================================
 
-int main() {
+int main(int argc, char** argv) {
+    if (argc > 1) {
+        std::string payload_path;
+        std::string output_path = "artifacts/sparc_substrate_output.json";
+        for (int i = 1; i < argc; i++) {
+            std::string arg = argv[i];
+            if (arg == "--sparc-payload" && i + 1 < argc) {
+                payload_path = argv[++i];
+            } else if (arg == "--sparc-output" && i + 1 < argc) {
+                output_path = argv[++i];
+            } else {
+                std::cerr << "ERROR: unknown argument: " << arg << "\n";
+                return 1;
+            }
+        }
+        if (payload_path.empty()) {
+            std::cerr << "ERROR: --sparc-payload requires a sanitized payload path\n";
+            return 1;
+        }
+        std::filesystem::create_directories(std::filesystem::path(output_path).parent_path());
+        return run_sparc_payload_mode(payload_path, output_path);
+    }
+
     std::cout << "========================================================================\n";
     std::cout << "FINITE POSSIBILITY MECHANICS v7.0-axcore-cpp -- EMERGENT LATTICE SIMULATOR\n";
     std::cout << "========================================================================\n\n";
