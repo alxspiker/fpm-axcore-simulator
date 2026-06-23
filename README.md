@@ -135,6 +135,7 @@ From `artifacts/fpm_axcore_results.json`:
 | Time dilation gradient | measured |
 | Emergent gravity route cost | measured |
 | Dynamic torsion phase-lock | `PASS` |
+| Causal wave (emergent photon) | `PASS` |
 
 Bell/CHSH:
 
@@ -192,13 +193,32 @@ Standard quantum mechanics postulates non-locality as an inherent, unexplained p
 
 The engine did not calculate Bell's Theorem. It simulated the thermodynamic starvation of a memory array, and the Tsirelson bound of $2\sqrt{2}$ natively emerged as the absolute limit of the substrate's integer math.
 
+## Causal Wave Propagation (The Emergent Photon)
+
+In Finite Possibility Mechanics, a photon is not a fundamental particle. It is a purely 1-Dimensional causal wave that propagates when a daemon operates at the absolute maximum energy limit ($E \to E_{max}$). At this extreme thermodynamic threshold, the vacuum routing tensor's isotropic friction collapses (Gauge Coherence). This allows the daemon to perfectly transfer 100% of its energy and momentum payloads forward, leaving a perfectly depleted ($E=0$) ZOMBIE vacuum in its wake.
+
+To enforce the $c_{light}$ velocity limit and prevent memory-layout execution artifacts (Gauss-Seidel cascades), the Radix Heap intrinsically delays the target node's next scheduled execution by exactly one universal tick (`ACTION_STEPS_PER_UNIVERSAL_TICK`).
+
+```powershell
+.\build\fpm_axcore.exe --photon-propagation-output artifacts\photon_wave.json
+```
+
+| Quantity | Value |
+| --- | ---: |
+| Corridor | `100 x 4 x 4` |
+| Propagation Speed | `1.0` cell / universal tick |
+| Transport Mechanism | Non-dispersive Soliton |
+| Wake State | `E = 0`, `R = 0` |
+
+The engine forces the wave to map exactly 1-for-1 with the universal action steps, propagating flawlessly down the corridor at exactly the absolute causal limit $c_{light}$.
+
 ## Scheduler Trajectory
 
 The toy lattice run uses `8 x 8 x 4 = 256` daemons. All remain active through the default run.
 
 | Quantity | Value |
 | --- | ---: |
-| Active daemons | `256 / 256` |
+| Active daemons | `222 / 256` |
 | Tick count range | `[54, 55]` |
 | Tick count std | `0.2802717362` |
 

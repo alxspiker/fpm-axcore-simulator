@@ -501,6 +501,7 @@ struct Daemon {
     // Thermodynamic scheduling state
     int    local_tick_count;
     bool   is_active;
+    uint64_t locked_until;
 };
 
 class Z3Lattice {
@@ -552,6 +553,7 @@ public:
                     dm.Omega_prev = Omega_op;
                     dm.local_tick_count = 0;
                     dm.is_active = true;
+                    dm.locked_until = 0;
                 }
             }
         }
@@ -955,12 +957,113 @@ public:
             return false;
         }
 
-        // Closed-universe replenishment (simplified: local self-replenishment)
-        double r = L_out; // baseline: sum r = sum L
+        // ---------------------------------------------------------
+        // HARDWARE LOCK INTERCEPTION
+        // ---------------------------------------------------------
+        if (universal_step < dm.locked_until) {
+            // A phantom thermal event popped early. Defer it until the lock expires.
+            heap.push({dm.locked_until, ev.flat_idx});
+            return false;
+        }
 
-        // Energy update
-        double E_new = dm.E - L_out + r;
-        dm.E = std::max(0.0, std::min(d.E_max, E_new));
+        // ---------------------------------------------------------
+        // ACTIVE BOUNDARY RESOLVER: Neighbor Spillover & Exhaust
+        // ---------------------------------------------------------
+        
+        double prior_E = dm.E; 
+        
+        // 1. Resolve spatial flux weights from the routing tensor
+        double w[6];
+        double base_iso = 0.05; 
+        w[0] = std::max(base_iso, -dm.R[0][0]); 
+        w[1] = std::max(base_iso,  dm.R[0][0]); 
+        w[2] = std::max(base_iso, -dm.R[1][1]); 
+        w[3] = std::max(base_iso,  dm.R[1][1]); 
+        w[4] = std::max(base_iso, -dm.R[2][2]); 
+        w[5] = std::max(base_iso,  dm.R[2][2]); 
+
+        double max_w = w[0];
+        int max_n = 0;
+        for (int n = 1; n < 6; n++) {
+            if (w[n] > max_w) { max_w = w[n]; max_n = n; }
+        }
+
+        // THE GAUGE CONSTRAINT (Evaluate BEFORE paying exhaust)
+        // Set threshold to 0.995 to distinguish from the Torsion Link which operates at 0.99
+        bool is_causal_wave = (prior_E >= 0.995 * d.E_max) && (max_w >= 4.0); 
+        
+        // 2. Pay the absolute thermodynamic cost 
+        // Photons are pure momentum carriers; they do not pay thermal friction.
+        double intended_exhaust = is_causal_wave ? 0.0 : L_out;
+        double actual_exhaust = std::min(dm.E, intended_exhaust);
+        dm.E -= actual_exhaust;
+
+        if (is_causal_wave) {
+            for (int n = 0; n < 6; n++) {
+                w[n] = (n == max_n) ? 1.0 : 0.0;
+            }
+        }
+
+        double sum_w = w[0] + w[1] + w[2] + w[3] + w[4] + w[5];
+        if (sum_w <= 0.0) sum_w = 1.0; 
+        
+        int nbrs[6];
+        lattice.neighbors6(ev.flat_idx, nbrs);
+
+        // Bulk energy payload for causal waves
+        double transferable_E = is_causal_wave ? dm.E : 0.0;
+
+        // 3. Advect Energy and Momentum across the Z^3 boundary
+        for (int n = 0; n < 6; n++) {
+            if (w[n] <= 0.0) continue; 
+            
+            double flux_frac = w[n] / sum_w;
+            Daemon& target = lattice.arena[nbrs[n]];
+            
+            // Advect Thermal Exhaust 
+            if (actual_exhaust > 0.0) {
+                target.E = std::min(d.E_max, target.E + (actual_exhaust * flux_frac));
+                if (target.E > 0.0) target.is_active = true;
+            }
+            
+            // Advect Bulk Energy (Soliton Payload)
+            if (transferable_E > 0.0) {
+                double e_shift = transferable_E * flux_frac;
+                target.E = std::min(d.E_max, target.E + e_shift);
+                dm.E = std::max(0.0, dm.E - e_shift);
+                if (target.E > 0.0) target.is_active = true;
+            }
+            
+            // Momentum Advection 
+            double conductivity = is_causal_wave ? 1.0 : (prior_E / d.E_max);
+            double transfer_rate = conductivity * flux_frac; 
+            
+            for (int i = 0; i < 3; i++) {
+                for (int j = 0; j < 3; j++) {
+                    double delta = dm.R[i][j] * transfer_rate;
+                    target.R[i][j] += delta;
+                    dm.R[i][j] -= delta;
+                }
+            }
+        }
+        
+        // ---------------------------------------------------------
+        // CAUSAL SCHEDULING DELAY (The Speed of Light Limit)
+        // ---------------------------------------------------------
+        if (is_causal_wave) {
+            for (int n = 0; n < 6; n++) {
+                if (w[n] <= 0.0) continue;
+                int target_idx = nbrs[n];
+                
+                // Hardware lock the target node perfectly until the transit time passes
+                uint64_t wake_time = universal_step + ACTION_STEPS_PER_UNIVERSAL_TICK;
+                lattice.arena[target_idx].locked_until = wake_time;
+                
+                // Push the execution event so it wakes up
+                heap.push({wake_time, target_idx});
+            }
+        }
+        // ---------------------------------------------------------
 
         // Phase rotation from route cost
         double theta = 0.37;
@@ -1021,9 +1124,11 @@ public:
 
         // Re-schedule on the integer action lattice. Route cost still determines
         // the period, but the global event ledger advances only in fixed quanta.
-        double L_clamped = std::max(d.L_rest, std::min(d.L_max, L_out));
-        uint64_t period_steps = period_to_steps(L_clamped);
-        heap.push({ev.next_step + period_steps, ev.flat_idx});
+        if (!is_causal_wave) {
+            double L_clamped = std::max(d.L_rest, std::min(d.L_max, L_out));
+            uint64_t period_steps = period_to_steps(L_clamped);
+            heap.push({ev.next_step + period_steps, ev.flat_idx});
+        }
 
         return true;
     }
@@ -1693,6 +1798,129 @@ static int run_dynamic_torsion_mode(const std::string& output_path) {
 }
 
 // =============================================================================
+// EMERGENT PHOTON PROPAGATION (CAUSAL WAVE LIMIT)
+// =============================================================================
+
+static int run_photon_propagation_mode(const std::string& output_path) {
+    Axioms ax;
+    DerivedConstants d = derive_all(ax);
+    
+    // Z^3 Corridor: 100 cells long, 4x4 cross-section
+    int len_x = 100;
+    Z3Lattice lattice(len_x, 4, 4, d, 1337);
+    ThermodynamicScheduler sched(lattice, d);
+
+    // THERMALIZATION: Scatter the background vacuum and misalign timestamps
+    for (int t = 0; t < 5; t++) {
+        uint64_t thermal_target = sched.universal_step + ACTION_STEPS_PER_UNIVERSAL_TICK;
+        while (sched.universal_step < thermal_target && !sched.heap.empty()) {
+            double L, O, k;
+            sched.step_one(L, O, k);
+        }
+    }
+
+    // Inject the causal wave (photon) at x = 5
+    int inject_x = 5;
+    uint64_t sync_time = sched.universal_step + ACTION_STEPS_PER_UNIVERSAL_TICK;
+    for (int y = 0; y < 4; y++) {
+        for (int z = 0; z < 4; z++) {
+            int idx = lattice.flat(inject_x, y, z);
+            Daemon& dm = lattice.arena[idx];
+            dm.E = d.E_max;
+            dm.R[0][0] += 5.0; // Pure longitudinal forward momentum
+            dm.is_active = true;
+            
+            // Synchronize the injection to form a coherent planar wave
+            dm.locked_until = sync_time;
+            sched.heap.push({sync_time, idx});
+        }
+    }
+
+    std::vector<int> ticks_out;
+    std::vector<double> peak_x_out;
+    std::vector<double> leading_edge_out;
+    std::vector<double> total_arena_energy;
+
+    uint64_t current_target_step = sched.universal_step;
+
+    // Track the propagation over 80 universal ticks
+    for (int tick = 0; tick < 80; tick++) {
+        
+        // Advance the target ledger by exactly 1 universal tick
+        current_target_step += ACTION_STEPS_PER_UNIVERSAL_TICK;
+        
+        // Execute strictly by the thermodynamic clock, not an arbitrary array count
+        while (sched.universal_step < current_target_step && !sched.heap.empty()) {
+            double L, O, k;
+            sched.step_one(L, O, k);
+        }
+        
+        sched.mean_field_truth_target();
+
+        // Scan the corridor to find the photon's location
+        double max_E = 0.0;
+        double peak_x = 0.0;
+        double leading_edge = 0.0;
+        double current_total_E = 0.0;
+
+        // Profile the cross-section of the corridor
+        for (int x = 0; x < len_x; x++) {
+            double slice_E = 0.0;
+            for (int y = 0; y < 4; y++) {
+                for (int z = 0; z < 4; z++) {
+                    slice_E += lattice.arena[lattice.flat(x, y, z)].E;
+                }
+            }
+            current_total_E += slice_E;
+            
+            if (slice_E > max_E) {
+                max_E = slice_E;
+                peak_x = (double)x;
+            }
+            
+            // Define the leading edge as the furthest x-coordinate where the 
+            // energy perturbation is strictly above the vacuum baseline (0.5)
+            if (slice_E > 16.0 * 0.51) { // 16 nodes in a 4x4 slice, baseline is 0.5
+                leading_edge = std::max(leading_edge, (double)x);
+            }
+        }
+
+        ticks_out.push_back(tick);
+        peak_x_out.push_back(peak_x);
+        leading_edge_out.push_back(leading_edge);
+        total_arena_energy.push_back(current_total_E);
+    }
+
+    // Output the telemetry
+    std::ofstream f(output_path);
+    if (!f) {
+        std::cerr << "ERROR: failed to open photon output: " << output_path << "\n";
+        return 6;
+    }
+    
+    f << std::setprecision(15);
+    f << "{\n";
+    f << "  \"mode\": \"photon_propagation\",\n";
+    f << "  \"lattice\": [" << len_x << ", 4, 4],\n";
+    
+    f << "  \"ticks\": [";
+    for(size_t i = 0; i < ticks_out.size(); i++) { if(i) f << ","; f << ticks_out[i]; }
+    f << "],\n";
+
+    f << "  \"leading_edge_x\": [";
+    for(size_t i = 0; i < leading_edge_out.size(); i++) { if(i) f << ","; f << leading_edge_out[i]; }
+    f << "],\n";
+    
+    f << "  \"peak_x\": [";
+    for(size_t i = 0; i < peak_x_out.size(); i++) { if(i) f << ","; f << peak_x_out[i]; }
+    f << "]\n";
+    f << "}\n";
+
+    std::cout << "Photon causal wave output saved to: " << output_path << "\n";
+    return 0;
+}
+
+// =============================================================================
 // CALIBRATION
 // =============================================================================
 
@@ -1847,6 +2075,10 @@ int main(int argc, char** argv) {
                 output_path = argv[++i];
             } else if (arg == "--torsion-phase-lock-output" && i + 1 < argc) {
                 torsion_output_path = argv[++i];
+            } else if (arg == "--photon-propagation-output" && i + 1 < argc) {
+                std::string photon_path = argv[++i];
+                std::filesystem::create_directories(std::filesystem::path(photon_path).parent_path());
+                return run_photon_propagation_mode(photon_path);
             } else {
                 std::cerr << "ERROR: unknown argument: " << arg << "\n";
                 return 1;
