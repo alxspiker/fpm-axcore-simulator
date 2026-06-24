@@ -38,6 +38,12 @@ Compile and run the C++ simulator:
 .\compile_and_run.ps1
 ```
 
+Compile the C++ simulator to WebAssembly:
+
+```powershell
+.\compile_wasm.ps1 -RunSmoke
+```
+
 Generate charts from the simulator JSON:
 
 ```powershell
@@ -90,6 +96,28 @@ artifacts/torsion_phase_lock.json
 ### MinGW Runtime Note
 
 The C++ binary is compiled with MinGW (`g++` from MSYS2) and dynamically links against MinGW runtime DLLs. When running the exe outside of `compile_and_run.ps1` or the test harness, ensure `C:\msys64\mingw64\bin` is on PATH. Without it, Windows raises a silent `0xC0000135` (STATUS_DLL_NOT_FOUND) exception that mimics a kernel-level execution block. The test harness handles this automatically via `launch_cpp_with_runtime`.
+
+### WebAssembly Build Note
+
+The repo includes a WebAssembly build script:
+
+```powershell
+.\compile_wasm.ps1
+```
+
+It expects the official Emscripten SDK at `%USERPROFILE%\emsdk`. The script sources `emsdk_env.bat`, builds `web/fpm_axcore.js` and `web/fpm_axcore.wasm`, and can run a Node smoke test:
+
+```powershell
+.\compile_wasm.ps1 -RunSmoke
+```
+
+The smoke test runs the dynamic torsion mode through Node and writes `web/torsion_smoke.json`.
+
+The default optimization is currently `-O0` because Windows Application Control blocked Emscripten's Binaryen optimizer (`wasm-opt.exe`) on this machine. The unoptimized WASM build still compiles and runs. If your policy allows `wasm-opt.exe`, you can request an optimized build:
+
+```powershell
+.\compile_wasm.ps1 -Optimization "-O3" -RunSmoke
+```
 
 ## Architecture
 
