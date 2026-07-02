@@ -64,9 +64,11 @@ void spectral_gap_weights(const double R[3][3], double& w_H, double& w_S) {
         sigmas[1] = m * det_cos(theta - 2.0*PI/3.0) + tr/3.0;
         sigmas[2] = m * det_cos(theta - 4.0*PI/3.0) + tr/3.0;
     }
-    // Sort descending
+    // The roots above are eigenvalues of R^T R. Singular values are their
+    // non-negative square roots.
+    for (double& sigma : sigmas) sigma = det_sqrt(std::max(0.0, sigma));
     std::sort(sigmas, sigmas + 3, std::greater<double>());
-    for (int i = 0; i < 3; i++) sigmas[i] = std::max(1e-30, sigmas[i]);
+    for (double& sigma : sigmas) sigma = std::max(1e-30, sigma);
 
     double sum_s = sigmas[0] + sigmas[1] + sigmas[2];
     w_H = (sum_s > 0) ? sigmas[0] / sum_s : 1.0/3.0;
@@ -135,4 +137,3 @@ void viscosity_update(const Daemon& dm, const DerivedConstants& d,
     double dOmega = d.Omega_max - d.Omega_min;
     Omega = d.Omega_max - dOmega * kappa;
 }
-
